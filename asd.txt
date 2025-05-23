@@ -1,0 +1,93 @@
+sk-4f11fd4cf64944ac9a7d54fb6b1744b0
+
+
+
+
+import os
+import fitz  # PyMuPDF
+import numpy as np
+import faiss
+from transformers import AutoTokenizer, AutoModel
+from database import load_pdfs_to_db, add_query_to_database  # Импортируем функции работы с БД
+from openai import OpenAI
+
+
+
+# Инициализация клиента DeepSeek
+client = OpenAI(
+    api_key="sk-4f11fd4cf64944ac9a7d54fb6b1744b0",  # Замени на свой API Key
+    base_url="https://api.deepseek.com"  # Укажи базовый URL DeepSeek API
+)
+
+# Загрузка предобученной модели для создания эмбеддингов
+tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+model = AutoModel.from_pretrained("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+
+load_pdfs_to_db()
+
+# Функция для чтения текста из PDF-файла
+def extract_text_from_pdf(pdf_path):
+    doc = fitz.open(pdf_path)
+    text = ""
+    for page in doc:
+        text += page.get_text()
+    return text
+
+# Загрузка всех PDF-файлов из папки PDFS
+def load_documents_from_folder(folder_path):
+    documents = []
+    for filename in os.listdir(folder_path):
+        if filename.endswith(".pdf"):
+            pdf_path = os.path.join(folder_path, filename)
+            text = extract_text_from_pdf(pdf_path)
+            documents.append(text)
+    return documents
+
+
+# Функция для создания эмбеддингов текста
+def get_embedding(text):
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True)
+    outputs = model(**inputs)
+    return outputs.last_hidden_state.mean(dim=1).detach().numpy()
+
+# Загрузка данных из PDF-файлов
+folder_path = "PDFS"  # Укажи путь к папке с PDF-файлами
+documents = load_documents_from_folder(folder_path)
+
+# Создание индекса для поиска
+embeddings = np.array([get_embedding(doc) for doc in documents])
+embeddings = embeddings.squeeze(axis=1)  # Убираем лишнюю ось (1)
+index = faiss.IndexFlatL2(embeddings.shape[1])
+index.add(embeddings)
+
+# Функция для поиска релевантных документов
+def search_relevant_documents(query, k=3):
+    query_embedding = get_embedding(query)
+    query_embedding = query_embedding.squeeze(axis=0)  # Убираем лишнюю ось для запроса
+    distances, indices = index.search(np.array([query_embedding]), k)
+    return [documents[i] for i in indices[0]]
+
+# Функция для генерации ответа с использованием DeepSeek API
+def generate_answer_with_deepseek(query):
+    relevant_docs = search_relevant_documents(query)
+    context = " ".join(relevant_docs)
+    
+    response = client.chat.completions.create(
+        model="deepseek-chat",  
+        messages=[
+            {"role": "system", "content": "Ты помощник, который отвечает на вопросы на основе предоставленного контекста."},
+            {"role": "user", "content": f"Контекст: {context}\n\nВопрос: {query}\n\nОтвет:"}
+        ],
+        stream=False
+    )
+    return response.choices[0].message.content
+
+# Запрос из консоли
+while True:
+    query = input("Напишіть запит (или введите 'вихід' для завершения): ")
+    if query.lower() == "вихід":
+        print("Программа завершена.")
+        break
+    answer = generate_answer_with_deepseek(query)
+    print("\nВідповідь:", answer, "\n")
+
